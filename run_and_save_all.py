@@ -8,6 +8,7 @@ import os
 import time
 import tqdm
 import numpy as np
+from PIL import Image
 
 import struct
 import imageio
@@ -57,6 +58,9 @@ def write_image(file, img, quality=95):
 
 def main(args):
 
+    if args.depth == 'gt' and args.pose == 'colmap':
+        raise ValueError("Cannot GT depths with COLMAP poses")
+
     PATH_RAW_DATA = args.path_raw_data
     PATH_DEPTH_GT = args.path_depth_gt
     PATH_COLMAP = args.path_colmap
@@ -71,39 +75,74 @@ def main(args):
 
         temp_dir = Path(tempfile.mkdtemp())
 
-        scene_file = PATH_OUTPUT / seq
+        scene_file = PATH_OUTPUT / f'pose_{args.pose}_depth_{args.depth}' / seq
         scene_file.mkdir(parents=True, exist_ok=True)
         scene_file = scene_file / 'transforms.json'
 
-        # Convert COLMAP model into text
-        bincam = rwm.read_cameras_binary(PATH_COLMAP / seq / 'colmap' / 'sparse' / 'cameras.bin')
-        rwm.write_cameras_text(bincam, temp_dir / 'cameras.txt')
-        binimg = rwm.read_images_binary(PATH_COLMAP / seq / 'colmap' / 'sparse' / 'images.bin')
-        rwm.write_images_text(binimg, temp_dir / 'images.txt')
 
-        # Run COLMAP2NERF
-        os.system(' '.join([
-            'python3 scripts/colmap2nerf.py',
-            '--images', str(PATH_RAW_DATA / seq[:10] / seq / 'image_02' / 'data'),
-            '--text', str(temp_dir),
-            '--out', str(scene_file),
-        ]))
+        # 1.1 Create scene file with the poses
+        if args.pose == 'colmap':
+            # Convert COLMAP model into text
+            pts_model = rwm.read_points3D_binary(PATH_COLMAP / seq / 'colmap' / 'sparse' / 'points3D.bin')
+            cam_model = rwm.read_cameras_binary(PATH_COLMAP / seq / 'colmap' / 'sparse' / 'cameras.bin')
+            rwm.write_cameras_text(cam_model, temp_dir / 'cameras.txt')
+            img_model = rwm.read_images_binary(PATH_COLMAP / seq / 'colmap' / 'sparse' / 'images.bin')
+            rwm.write_images_text(img_model, temp_dir / 'images.txt')
 
+            # Run COLMAP2NERF
+            os.system(' '.join([
+                'python3 scripts/colmap2nerf.py',
+                '--images', str(PATH_RAW_DATA / seq[:10] / seq / 'image_02' / 'data'),
+                '--text', str(temp_dir),
+                '--out', str(scene_file),
+            ]))
+        elif args.pose == 'gt':
+            raise NotImplementedError('GT poses not implemented yet')
+
+        # 1.2 Modify scene file with the relative paths and depths
         with open(scene_file, 'r') as f:
             data = json.load(f)
 
         for frame in data['frames']:
 
+            # Update the relative path
             img_path = PATH_RAW_DATA / seq[:10] / seq / 'image_02' / 'data' / frame['file_path'][-14:]
             frame['file_path'] = os.path.relpath(str(img_path), scene_file.parent.resolve())
 
-            if args.colmap_depth or args.gt_depth:
+            if args.depth == 'colmap':
+
+                # Find the corresponding image model
+                try:
+                    v = next(v for v in img_model.values() if v.name in img_path.name)
+                except:
+                    print(f'Could not find depth for {img_path.name}')
+                    continue
+
+                # Project the 3D points into the image
+                colmap_depths = np.array([(v.qvec2rotmat() @ pts_model[p3d].xyz + v.tvec)[2] for p3d in v.point3D_ids[v.point3D_ids > -1]])
+                colmap_coords = np.array([v.xys[np.where(v.point3D_ids == p3d)][0, ::-1] for p3d in v.point3D_ids[v.point3D_ids > -1]])
+                colmap_coords = np.round(colmap_coords).astype(int)
+
+                # Fill sparse depth map
+                depth_img = np.zeros((cam_model[1].height, cam_model[1].width), dtype=np.uint16)
+                depth_img[colmap_coords[:, 0], colmap_coords[:, 1]] = (colmap_depths * 256).astype(np.uint16)
+
+                # Save depth map
+                Image.fromarray(depth_img).save(temp_dir / img_path.name)
+                frame['depth_path'] = os.path.relpath(temp_dir / img_path.name, scene_file.parent.resolve())                
+
+            elif args.depth == 'gt':
                 depth_path_1 = PATH_DEPTH_GT / 'val' / seq / 'proj_depth' / 'groundtruth' / 'image_02' / frame['file_path'].split('/')[-1]
                 depth_path_2 = PATH_DEPTH_GT / 'train' / seq / 'proj_depth' / 'groundtruth' / 'image_02' / frame['file_path'].split('/')[-1]
                 if depth_path_1.is_file():
                     frame['depth_path'] = os.path.relpath(depth_path_1.resolve(), scene_file.parent.resolve())
                 elif depth_path_2.is_file():
                     frame['depth_path'] = os.path.relpath(depth_path_2.resolve(), scene_file.parent.resolve())
+
+        # Depth scale
+        if args.depth == 'colmap':
+            data['enable_depth_loading'] = True
+            data['integer_depth_scale'] = 1.0 / 256.0
         
         with open(scene_file, 'w') as json_file:
             json.dump(data, json_file, indent=4)
@@ -131,6 +170,9 @@ def main(args):
 
         old_training_step = 0
         n_steps = n_steps
+
+        if args.depth != 'none' and testbed.nerf.training.depth_supervision_lambda == 0.0:
+            raise ValueError('Depth supervision is disabled but depth is provided, set a non-zero value for depth_supervision_lambda')
 
         tqdm_last_update = 0
         if n_steps > 0:
@@ -194,6 +236,13 @@ def main(args):
                 image = testbed.render(W, H, spp, True)
                 np.save(str(scene_file.parent / 'depth' / frame['file_path'].split('/')[-1][:10]), image[:,:,0])
 
+                # For debug
+                import matplotlib.pyplot as plt
+                plt.imsave(str(scene_file.parent / 'depth' / frame['file_path'].split('/')[-1]), image[:,:,0])
+
+
+        # Remove temp dir
+        shutil.rmtree(temp_dir)
 
 
 
@@ -201,8 +250,8 @@ def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Run fancy stuff")
-    parser.add_argument("--colmap_depth", action="store_true", help="Use COLMAP sparse depth as supervision")
-    parser.add_argument("--gt_depth",action="store_true", help="Use GT depth as supervision")
+    parser.add_argument("--pose", default='gt', choices=['colmap', 'gt'], help="Use COLMAP poses or GT poses")
+    parser.add_argument("--depth", default='none', choices=['none', 'colmap', 'gt'], help="Use COLMAP sparse depth as supervision or GT semi-dense depth")
     parser.add_argument("--n_steps", type=int, help="Number of steps in Nerf training", default=20000)
     parser.add_argument("--path_raw_data", type=Path, help="Path to raw KITTI data")
     parser.add_argument("--path_depth_gt", type=Path, help="Path to GT depth data")
