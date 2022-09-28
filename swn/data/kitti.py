@@ -104,9 +104,12 @@ class KITTI(torch.utils.data.Dataset):
         x = Image.open(self.x_list[idx])
 
         if self.path_nerf_renders is not None:
-            seq = str(self.x_list[idx]).split('/')[-4]
-            x_nerf = Image.open(Path(self.path_nerf_renders) / seq / 'rgb' / self.x_list[idx].name)
-            y_nerf = np.load(Path(self.path_nerf_renders) / seq / 'depth' / (self.x_list[idx].name[-15:-4] + '.npy'))
+            try:
+                seq = str(self.x_list[idx]).split('/')[-4]
+                x_nerf = Image.open(Path(self.path_nerf_renders) / seq / 'rgb' / self.x_list[idx].name)
+                y_nerf = np.load(Path(self.path_nerf_renders) / seq / 'depth' / (self.x_list[idx].name[-15:-4] + '.npy'))
+            except:
+                return None, None, None, None
 
         y = self.y_transforms(y) / 256.0
         x = self.x_transforms(x)
