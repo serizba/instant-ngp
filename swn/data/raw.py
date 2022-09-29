@@ -5,6 +5,7 @@ import glob
 import json
 import os
 from collections import namedtuple
+from pathlib import Path
 
 import numpy as np
 import matplotlib.image as mpimg
@@ -12,7 +13,12 @@ import matplotlib.image as mpimg
 __author__ = "Lee Clement"
 __email__ = "lee.clement@robotics.utias.utoronto.ca"
 
+import sys
+sys.path.append('/home/serizba/phd/supervisingnerf/fork/')
+
 from scripts.colmap2nerf import sharpness, closest_point_2_lines
+
+from swn.data import kitti_loader as kl
 
 
 class raw:
@@ -201,7 +207,7 @@ class raw:
 					line = line.split()
 					# Last five entries are flags and counts
 					line[:-5] = [float(x) for x in line[:-5]]
-					line[-5:] = [int(x) for x in line[-5:]]
+					line[-5:] = [float(x) for x in line[-5:]]
 
 					data = OxtsPacket(*line)
 					oxts_packets.append(data)
@@ -294,15 +300,19 @@ class raw:
 
 		impairs = []
 		for imfiles in zip(imL_files, imR_files):
-			imL = np.uint8(mpimg.imread(imfiles[0]) * 255)
-			imR = np.uint8(mpimg.imread(imfiles[1]) * 255)
-			impairs.append(StereoPair(imL, imR))
+			try:
+				imL = np.uint8(mpimg.imread(imfiles[0]) * 255)
+				imR = np.uint8(mpimg.imread(imfiles[1]) * 255)
+				impairs.append(StereoPair(imL, imR))
+			except:
+				print('Could not read image pair: ' + str(imfiles))
+				continue
 
 		return impairs
 
 
 if __name__ == "__main__":
-	kitti = raw("/home/rene/Kitti/raw_data/", "2011_09_26", "0002", frame_range=None)
+	kitti = raw("/home/serizba/phd/data/kitti/raw_data_2/", "2011_09_26", "0002", frame_range=None)
 	kitti.load_oxts()
 	kitti.load_rgb()
 
@@ -323,13 +333,20 @@ if __name__ == "__main__":
 		"frames":[]
 	}
 
+	poses_imu_w, calibrations, focal = kl.get_poses_calibration('/home/serizba/phd/data/kitti/raw_data_2/2011_09_26/2011_09_26_drive_0002_sync', oxts_path_tracking=None)
+	imu2velo, velo2cam, c2leftRGB, c2rightRGB, _ = calibrations
+	velo2imu = kl.invert_transformation(calibrations[0][:3, :3], calibrations[0][:3, 3])
+	poses_velo_w = np.matmul(poses_imu_w, velo2imu)
+	cam_poses = kl.get_camera_poses(poses_velo_w, calibrations, [0, 76])
+
 	for i in range(len(kitti.oxts)):
 		try:
-			b = sharpness(kitti.rgbR_path[i])
+			b = sharpness(kitti.rgbL_path[i])
 		except:
-			print(f"Error: failed to open {kitti.rgbR_path[i]}")
+			print(f"Error: failed to open {kitti.rgbL_path[i]}")
 			continue
-		frame = {"file_path": kitti.rgbR_path[i], "sharpness": b, "transform_matrix": kitti.oxts[i].T_w_imu}
+		frame = {"file_path": os.path.relpath(kitti.rgbL_path[i], '/home/serizba/phd/supervisingnerf/fork/ablation/transforms_gt/'), "sharpness": b, "transform_matrix": kitti.oxts[i].T_w_imu}
+		frame['transform_matrix'] = cam_poses[i * 2]
 		out["frames"].append(frame)
 
 
@@ -361,6 +378,22 @@ if __name__ == "__main__":
 
 	for f in out["frames"]:
 		f["transform_matrix"] = f["transform_matrix"].tolist()
+		PATH_DEPTH_GT = Path('/home/serizba/phd/data/kitti/data_depth_annotated')
+		seq = '2011_09_26_drive_0002_sync'
+		depth_path_1 = PATH_DEPTH_GT / 'val' / seq / 'proj_depth' / 'groundtruth' / 'image_02' / f['file_path'].split('/')[-1]
+		depth_path_2 = PATH_DEPTH_GT / 'train' / seq / 'proj_depth' / 'groundtruth' / 'image_02' / f['file_path'].split('/')[-1]
+		print(depth_path_1)
+		if depth_path_1.is_file():
+			print('DEPTH FOUND')
+			f['depth_path'] = os.path.relpath(depth_path_1.resolve(), '/home/serizba/phd/supervisingnerf/fork/ablation/transforms_gt')
+		elif depth_path_2.is_file():
+			print('DEPTH FOUND')
+			f['depth_path'] = os.path.relpath(depth_path_2.resolve(), '/home/serizba/phd/supervisingnerf/fork/ablation/transforms_gt')
 
-	with open("../../data/nerf/kitty/transforms.json", "w") as outfile:
+	
+	out['enable_depth_loading'] = True
+	out['integer_depth_scale'] = (4.0 / avglen) * (1.0 / 256.0 )
+		
+
+	with open("/home/serizba/phd/supervisingnerf/fork/ablation/transforms_gt/transforms.json", "w") as outfile:
 		json.dump(out, outfile, indent=2)
