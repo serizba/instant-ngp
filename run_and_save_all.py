@@ -16,6 +16,31 @@ import imageio
 import swn.read_write_model as rwm
 from swn.data.kitti import KITTI_TEST_SEQS
 
+import cv2
+def variance_of_laplacian(image):
+	return cv2.Laplacian(image, cv2.CV_64F).var()
+
+def sharpness(imagePath):
+	image = cv2.imread(imagePath)
+	gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+	fm = variance_of_laplacian(gray)
+	return fm
+
+def closest_point_2_lines(oa, da, ob, db): # returns point closest to both rays of form o+t*d, and a weight factor that goes to 0 if the lines are parallel
+	da = da / np.linalg.norm(da)
+	db = db / np.linalg.norm(db)
+	c = np.cross(da, db)
+	denom = np.linalg.norm(c)**2
+	t = ob - oa
+	ta = np.linalg.det([t, db, c]) / (denom + 1e-10)
+	tb = np.linalg.det([t, da, c]) / (denom + 1e-10)
+	if ta > 0:
+		ta = 0
+	if tb > 0:
+		tb = 0
+	return (oa+ta*da+ob+tb*db) * 0.5, denom
+
+
 import pyngp as ngp # noqa
 
 
@@ -97,11 +122,77 @@ def main(args):
                 '--out', str(scene_file),
             ]))
         elif args.pose == 'gt':
-            raise NotImplementedError('GT poses not implemented yet')
+            from swn.data.raw import raw
+            import swn.data.kitti_loader as kl
+            kitti = raw(PATH_RAW_DATA, seq[:10], seq.split('_')[-2], frame_range=None)
+            kitti.load_oxts()
+            kitti.load_rgb()
+
+            data = {
+                "camera_angle_x": 1.4351344964896717,
+                "camera_angle_y": 0.49929363336706795,
+                "fl_x": 711.5252890399647,
+                "fl_y": 735.3929070454187,
+                "k1": 0,
+                "k2": 0,
+                "p1": 0,
+                "p2": 0,
+                "cx": 621.0,
+                "cy": 187.5,
+                "w": 1242.0,
+                "h": 375.0,
+                "aabb_scale": 16,
+                "frames":[]
+            }
+
+            poses_imu_w, calibrations, focal = kl.get_poses_calibration(f'{PATH_RAW_DATA}/{seq[:10]}/{seq}', oxts_path_tracking=None)
+            velo2imu = kl.invert_transformation(calibrations[0][:3, :3], calibrations[0][:3, 3])
+            poses_velo_w = np.matmul(poses_imu_w, velo2imu)
+            cam_poses = kl.get_camera_poses(poses_velo_w, calibrations, [0, len(kitti.oxts) - 1])
+
+            for i in range(len(kitti.oxts)):
+                try:
+                    b = sharpness(kitti.rgbL_path[i])
+                except:
+                    print(f"Error: failed to open {kitti.rgbL_path[i]}")
+                    continue
+                frame = {"file_path": kitti.rgbL_path[i], "sharpness": b, "transform_matrix": kitti.oxts[i].T_w_imu}
+                frame['transform_matrix'] = cam_poses[i * 2]
+                data["frames"].append(frame)
+
+            # find a central point they are all looking at
+            print("computing center of attention...")
+            totw = 0.0
+            totp = np.array([0.0, 0.0, 0.0])
+            for f in data["frames"]:
+                mf = f["transform_matrix"][0:3,:]
+                for g in data["frames"]:
+                    mg = g["transform_matrix"][0:3,:]
+                    p, w = closest_point_2_lines(mf[:,3], mf[:,2], mg[:,3], mg[:,2])
+                    if w > 0.00001:
+                        totp += p*w
+                        totw += w
+            if totw > 0.0:
+                totp /= totw
+            print(totp) # the cameras are looking at totp
+            for f in data["frames"]:
+                f["transform_matrix"][0:3,3] -= totp
+
+            avglen = 0.
+            for f in data["frames"]:
+                avglen += np.linalg.norm(f["transform_matrix"][0:3,3])
+            avglen /= len(data["frames"])
+            print("avg camera distance from origin", avglen)
+            for f in data["frames"]:
+                f["transform_matrix"][0:3,3] *= 4.0 / avglen # scale to "nerf sized"
+                f["transform_matrix"] = f["transform_matrix"].tolist()
+
+            scale_gt = 4.0 / avglen
 
         # 1.2 Modify scene file with the relative paths and depths
-        with open(scene_file, 'r') as f:
-            data = json.load(f)
+        if args.pose == 'colmap':
+            with open(scene_file, 'r') as f:
+                data = json.load(f)
 
         for frame in data['frames']:
 
@@ -122,9 +213,14 @@ def main(args):
                 colmap_depths = np.array([(v.qvec2rotmat() @ pts_model[p3d].xyz + v.tvec)[2] for p3d in v.point3D_ids[v.point3D_ids > -1]])
                 colmap_coords = np.array([v.xys[np.where(v.point3D_ids == p3d)][0, ::-1] for p3d in v.point3D_ids[v.point3D_ids > -1]])
                 colmap_coords = np.round(colmap_coords).astype(int)
+                H, W = cam_model[1].height, cam_model[1].width
+                # Filter out points outside the image
+                mask = (colmap_coords[:, 1] >= 0) & (colmap_coords[:, 1] < W) & (colmap_coords[:, 0] >= 0) & (colmap_coords[:, 0] < H)
+                colmap_coords = colmap_coords[mask]
+                colmap_depths = colmap_depths[mask]
 
                 # Fill sparse depth map
-                depth_img = np.zeros((cam_model[1].height, cam_model[1].width), dtype=np.uint16)
+                depth_img = np.zeros((H, W), dtype=np.uint16)
                 depth_img[colmap_coords[:, 0], colmap_coords[:, 1]] = (colmap_depths * 256).astype(np.uint16)
 
                 # Save depth map
@@ -143,6 +239,9 @@ def main(args):
         if args.depth == 'colmap':
             data['enable_depth_loading'] = True
             data['integer_depth_scale'] = 1.0 / 256.0
+        elif args.depth == 'gt':
+            data['enable_depth_loading'] = True
+            data['integer_depth_scale'] = scale_gt * (1.0 / 256.0 )
         
         with open(scene_file, 'w') as json_file:
             json.dump(data, json_file, indent=4)
