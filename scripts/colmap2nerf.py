@@ -254,6 +254,7 @@ if __name__ == "__main__":
 				# why is this requireing a relitive path while using ^
 				image_rel = os.path.relpath(IMAGE_FOLDER)
 				name = str(f"./{image_rel}/{'_'.join(elems[9:])}")
+				print(name)
 				try:
 					b=sharpness(name)
 				except:
@@ -276,6 +277,7 @@ if __name__ == "__main__":
 					up += c2w[0:3,1]
 
 				frame={"file_path":name,"sharpness":b,"transform_matrix": c2w}
+				print(frame)
 				out["frames"].append(frame)
 	nframes = len(out["frames"])
 

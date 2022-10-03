@@ -8,7 +8,7 @@
 # distribution of this software and related documentation without an express
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
 import sys
-pyngp_path = '/home/serizba/phd/supervisingdepth/instant-ngp'
+pyngp_path = '/home/rene/instant-ngp'
 sys.path.append(pyngp_path)
 import argparse
 import os
@@ -87,7 +87,6 @@ if __name__ == "__main__":
 
 	rgb_mode = testbed.render_mode
 	depth_mode = ngp.Depth
-
 	if args.scene:
 		scene = args.scene
 		if not os.path.exists(args.scene) and args.scene in scenes:
@@ -110,8 +109,8 @@ if __name__ == "__main__":
 	testbed.nerf.render_with_camera_distortion = True
 
 	network_stem = os.path.splitext(os.path.basename(network))[0]
-	if args.mode == "sdf":
-		setup_colored_sdf(testbed, args.scene)
+	# if args.mode == "sdf":
+	# 	setup_colored_sdf(testbed, args.scene)
 
 	if args.near_distance >= 0.0:
 		print("NeRF training ray near_distance ", args.near_distance)
@@ -141,7 +140,8 @@ if __name__ == "__main__":
 		# testbed.nerf.training.random_bg_color = False
 
 	old_training_step = 0
-	n_steps = args.n_steps
+	n_steps = 200
+	print(n_steps)
 
 
 	# If we loaded a snapshot, didn't specify a number of steps, _and_ didn't open a GUI,
@@ -222,19 +222,20 @@ if __name__ == "__main__":
 					ref_image[...,:3] *= ref_image[...,3:4]
 					ref_image += (1.0 - ref_image[...,3:4]) * testbed.background_color
 					ref_image[...,:3] = srgb_to_linear(ref_image[...,:3])
-
-				write_image(f"tmp/colmap_depth/ref_{i}.png", ref_image)
+				print(p)
+				temp_name = p.replace("../../Kitti/raw_data/","")
+				print(temp_name)
+				write_image(f"../tmp/"+temp_name, ref_image)
 
 				testbed.set_nerf_camera_matrix(np.matrix(frame["transform_matrix"])[:-1,:])
-
 				# Render and save RGB
 				testbed.render_mode = ngp.Shade
 				image = testbed.render(ref_image.shape[1], ref_image.shape[0], spp, True)
-				write_image(f"tmp/colmap_depth/ren_{i}.png", image)
+				write_image(f"../tmp/ren_{i}.png", image)
 
 				# Render and save depth
 				testbed.render_mode = ngp.Depth
 				image = testbed.render(ref_image.shape[1], ref_image.shape[0], spp, True)
-				np.save(f"tmp/colmap_depth/depth_{i}.npy", image[:,:,0])
+				np.save(f"../tmp/depth_{i}.npy", image[:,:,0])
 
 

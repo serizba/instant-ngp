@@ -6,8 +6,30 @@ from PIL import Image
 
 from pathlib import Path
 
-KITTI_TEST_SEQS = unique_seqs = [
-    '2011_09_26_drive_0002_sync',
+# Read Stereo-Depth values from colmap
+def read_array(path):
+    with open(path, "rb") as fid:
+        width, height, channels = np.genfromtxt(fid, delimiter="&", max_rows=1,
+                                                usecols=(0, 1, 2), dtype=int)
+        fid.seek(0)
+        num_delimiter = 0
+        byte = fid.read(1)
+        while True:
+            if byte == b"&":
+                num_delimiter += 1
+                if num_delimiter >= 3:
+                    break
+            byte = fid.read(1)
+        array = np.fromfile(fid, np.float32)
+    array = array.reshape((width, height, channels), order="F")
+    x = np.transpose(array, (1, 0, 2)).squeeze()
+    min_depth, max_depth = np.percentile(x, [1, 99])
+    x[x < min_depth] = min_depth
+    x[x > max_depth] = max_depth
+    return x
+
+KITTI_TEST_SEQS = unique_seqs = ['replica',
+    # '2011_09_26_drive_0002_sync',
     # '2011_09_26_drive_0009_sync',
     # '2011_09_26_drive_0013_sync',
     # # '2011_09_26_drive_0020_sync',
@@ -99,7 +121,7 @@ class KITTI(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         if torch.is_tensor(idx):
             idx = idx.tolist()
-
+        depth_img = 0
         y = Image.open(self.y_list[idx])
         x = Image.open(self.x_list[idx])
 
@@ -108,6 +130,11 @@ class KITTI(torch.utils.data.Dataset):
                 seq = str(self.x_list[idx]).split('/')[-4]
                 x_nerf = Image.open(Path(self.path_nerf_renders) / seq / 'rgb' / self.x_list[idx].name)
                 y_nerf = np.load(Path(self.path_nerf_renders) / seq / 'depth' / (self.x_list[idx].name[-15:-4] + '.npy'))
+                PATH_COLMAP = "/home/rene/Kitti/colmap/eigen_reconstructions"
+                colmap_depth_path = PATH_COLMAP +"/"+ seq +"/"+  "colmap"+"/"+  "stereo" +"/"+  "depth_maps"+"/"+  self.x_list[idx].name
+                print(colmap_depth_path)
+                colmap_depth_path = str(colmap_depth_path) + ".geometric.bin"
+                depth_img = read_array(colmap_depth_path)
             except:
                 return None, None, None, None
 
@@ -115,6 +142,7 @@ class KITTI(torch.utils.data.Dataset):
         x = self.x_transforms(x)
         x_nerf = self.x_transforms(x_nerf)[:3]
         y_nerf = torch.from_numpy(y_nerf).unsqueeze(0)
+        depth_img = torch.from_numpy(depth_img).unsqueeze(0)
 
         if self.kb_crop:
             _, H, W = x.shape
@@ -129,5 +157,5 @@ class KITTI(torch.utils.data.Dataset):
             print('WAAAAAAAAAAARNING!!!!')
 
         if self.path_nerf_renders is not None:
-            return x, y, x_nerf, y_nerf
+            return x, y, x_nerf, y_nerf,depth_img
         return x, y

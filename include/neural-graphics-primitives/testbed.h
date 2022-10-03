@@ -610,7 +610,7 @@ public:
 			default_rng_t density_grid_rng;
 			int view = 0;
 
-			float depth_supervision_lambda = 1.f;
+			float depth_supervision_lambda = 0.1f;
 
 			tcnn::GPUMemory<float> sharpness_grid;
 
