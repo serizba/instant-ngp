@@ -489,13 +489,13 @@ def get_camera_poses(poses_velo_w, calibrations, selected_frames):
     # poses_v_w = np.matmul(v2imu, poses_velo_w)
 
     opengl2kitti = np.array([[1, 0, 0, 0],
-                             [0, -1, 0, 0],
-                             [0, 0, -1, 0],
+                             [0, 1, 0, 0],
+                             [0, 0, 1, 0],
                              [0, 0, 0, 1]])
 
     cam2c0 = []
     for cam_transform in c02cam:
-        cam_i_2c0 = invert_transformation(cam_transform[:3, :3], cam_transform[:3, 3])
+        cam_i_2c0 = cam_transform
         # transform camera axis from kitti to opengl for nerf:
         cam_i_2c0 = np.matmul(cam_i_2c0, opengl2kitti)
 
